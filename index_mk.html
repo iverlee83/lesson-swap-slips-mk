@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Substitution Notice Slip Generator (MK)</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    margin: 0; padding: 24px; background: #f4f4f2; color: #1a1a1a;
+  }
+  .wrap { max-width: 820px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+  .sub { font-size: 13px; color: #666; margin: 0 0 18px; }
+  textarea {
+    width: 100%; min-height: 120px; padding: 12px; font-family: monospace;
+    font-size: 13px; border: 1px solid #ccc; border-radius: 8px; resize: vertical;
+  }
+  .btns { margin: 12px 0 24px; display: flex; gap: 10px; flex-wrap: wrap; }
+  button {
+    font-size: 14px; padding: 9px 18px; border-radius: 8px; cursor: pointer;
+    border: 1px solid #c44; background: #c44; color: #fff; font-weight: 500;
+  }
+  button.sec { background: #fff; color: #333; border-color: #ccc; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .err { color: #c00; font-size: 13px; margin: 8px 0; white-space: pre-wrap; }
+  .note { font-size: 12px; color: #777; margin: 6px 0 0; }
+
+  /* Slip styles (also used in PDF) */
+  /* Each slip is exactly half an A4 page so two fit per sheet. */
+  .slip {
+    background: #fff; border-radius: 4px;
+    padding: 20px 26px; margin: 0 0 14px;
+    box-sizing: border-box;
+    min-height: 132mm;            /* ~half of A4 (297mm) minus margins */
+    page-break-inside: avoid; break-inside: avoid;
+    display: flex; flex-direction: column;
+  }
+  .slip-head { text-align: center; border-bottom: 2px solid #333; padding-bottom: 8px; margin-bottom: 14px; }
+  .slip-title { font-size: 18px; font-weight: 700; margin: 0; }
+  .slip-kind { font-size: 11px; color: #666; margin: 3px 0 0; text-transform: uppercase; letter-spacing: .5px; }
+  .slip p { font-size: 13.5px; line-height: 1.6; margin: 0 0 10px; }
+  .slip .to { font-size: 15px; }
+  .slip table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 4px 0 12px; }
+  .slip th { text-align: left; color: #555; font-weight: 600; padding: 5px 8px; border-bottom: 1.5px solid #999; }
+  .slip td { padding: 5px 8px; border-bottom: 1px solid #ddd; }
+  .slip .remark { font-size: 12.5px; color: #555; margin: 4px 0 0; }
+  .slip .thanks { font-size: 13.5px; font-style: italic; color: #1a5; margin: auto 0 0; padding-top: 12px; }
+  .strong { font-weight: 700; }
+  #out { margin-top: 8px; }
+
+  /* On screen, show slips on a paper-like canvas */
+  @media screen {
+    #out { background: #fff; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Substitution Notice Slip Generator (MK)</h1>
+  <p class="sub">St. Hilary's School (Primary) — Mong Kok Campus — paste the swap table below, then generate slips.</p>
+
+  <textarea id="input" placeholder="Paste the table copied from Excel (including the header row)…"></textarea>
+  <p class="note">Tip: select the table in Excel including the header row, copy, and paste here. Columns are tab-separated automatically. The "Leave" column (4th column) is read but not shown on the slips.</p>
+
+  <div class="btns">
+    <button onclick="generate()">Generate slips</button>
+    <button class="sec" onclick="downloadPDF()" id="pdfBtn" disabled>Download PDF</button>
+    <button class="sec" onclick="loadSample()">Load sample</button>
+  </div>
+
+  <div class="err" id="err"></div>
+  <div id="out"></div>
+</div>
+
+<script>
+// MK version: column layout has an extra "Leave" column inserted at position 4
+// (after Subject Teacher, before Class). It is parsed but ignored when building slips.
+const SAMPLE = `Date\tDay\tSubject Teacher\tLeave\tClass\tLesson\tTime\tSubstitute Teacher\tSwap Date\tSwap Day\tClass\tSwap Lesson\tSwap Time\tRemark\tCover
+24-Jun\tWednesday\tWSC\tSick Leave\t4D\t5\t11:20 - 11:50\tCS\t26-Jun\tFriday\t4D\t5\t11:20 - 11:50\t4D GSH Lesson <--> 4D English Lesson\t
+24-Jun\tWednesday\tWSC\tSick Leave\t4D\t6\t11:50 - 12:20\tCS\t26-Jun\tFriday\t4D\t6\t11:50 - 12:20\t4D GSH Lesson <--> 4D English Lesson\t
+22-Jun\tMonday\tHP\tSick Leave\t6F\t5\t11:20 - 11:50\tWCY\t/\t/\t/\t/\t/\tcover\t1`;
+
+function loadSample(){ document.getElementById('input').value = SAMPLE; }
+
+function isBlank(v){ const t=(v||'').trim(); return t==='' || t==='/' || t==='-'; }
+
+function parseTable(text){
+  const lines = text.replace(/\r/g,'').split('\n').map(l=>l).filter(l=>l.trim()!=='');
+  if(lines.length<2) throw new Error('Please paste at least a header row and one data row.');
+  // detect header: first line containing "Subject Teacher" or "Substitute"
+  let start = 0;
+  if(/subject teacher|substitute/i.test(lines[0])) start = 1;
+  const rows = [];
+  for(let i=start;i<lines.length;i++){
+    const c = lines[i].split('\t');
+    if(c.length < 8) continue; // skip malformed (needs through Substitute Teacher, incl. Leave column)
+    rows.push({
+      date:      (c[0]||'').trim(),
+      day:       (c[1]||'').trim(),
+      subjTea:   (c[2]||'').trim(),
+      leave:     (c[3]||'').trim(),   // Leave column — parsed, not used on slips
+      cls:       (c[4]||'').trim(),
+      lesson:    (c[5]||'').trim(),
+      time:      (c[6]||'').trim(),
+      subTea:    (c[7]||'').trim(),
+      swapDate:  (c[8]||'').trim(),
+      swapDay:   (c[9]||'').trim(),
+      swapCls:   (c[10]||'').trim(),
+      swapLesson:(c[11]||'').trim(),
+      swapTime:  (c[12]||'').trim(),
+      remark:    (c[13]||'').trim(),
+      cover:     (c[14]||'').trim()
+    });
+  }
+  if(rows.length===0) throw new Error('No valid data rows found. Make sure you copied the whole table.');
+  return rows;
+}
+
+// group rows that belong to the same slip:
+// key = subTea + subjTea + date + cover-flag  (same cover/swap event, multiple lessons)
+function groupRows(rows){
+  const groups = {};
+  rows.forEach(r=>{
+    const isCover = r.cover==='1' || /cover/i.test(r.cover) && r.cover!=='';
+    const coverFlag = (r.cover==='1') ? 'C' : 'S';
+    const key = [r.subTea, r.subjTea, r.date, coverFlag].join('|');
+    if(!groups[key]) groups[key] = { ...firstMeta(r), isCover: r.cover==='1', rows: [] };
+    groups[key].rows.push(r);
+  });
+  return Object.values(groups);
+}
+function firstMeta(r){
+  return { subTea:r.subTea, subjTea:r.subjTea, date:r.date, day:r.day, remark:r.remark,
+           swapDate:r.swapDate, swapDay:r.swapDay };
+}
+
+function esc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function lessonTable(rows, swap){
+  let head = swap
+    ? '<tr><th>Date</th><th>Day</th><th>Class</th><th>Lesson</th><th>Time</th></tr>'
+    : '<tr><th>Date</th><th>Day</th><th>Class</th><th>Lesson</th><th>Time</th></tr>';
+  let body = rows.map(r=>{
+    if(swap){
+      return `<tr><td>${esc(r.swapDate)}</td><td>${esc(r.swapDay)}</td><td>${esc(r.swapCls)}</td><td>${esc(r.swapLesson)}</td><td>${esc(r.swapTime)}</td></tr>`;
+    }
+    return `<tr><td>${esc(r.date)}</td><td>${esc(r.day)}</td><td>${esc(r.cls)}</td><td>${esc(r.lesson)}</td><td>${esc(r.time)}</td></tr>`;
+  }).join('');
+  return `<table>${head}${body}</table>`;
+}
+
+function buildSlips(groups){
+  let html = '';
+  groups.forEach(g=>{
+    const remark = g.remark && !isBlank(g.remark) && !/^cover$/i.test(g.remark)
+      ? `<p class="remark">Remark: ${esc(g.remark)}</p>` : '';
+
+    if(g.isCover){
+      // single slip to cover teacher, no return swap
+      html += `<div class="slip">
+        <div class="slip-head">
+          <p class="slip-title">Lesson Cover Notice</p>
+          <p class="slip-kind">For cover teacher</p>
+        </div>
+        <p class="to">To: <span class="strong">${esc(g.subTea)}</span></p>
+        <p>You are arranged to <span class="strong">cover</span> the following lesson(s) for <span class="strong">${esc(g.subjTea)}</span>:</p>
+        ${lessonTable(g.rows,false)}
+        ${remark}
+        <p class="thanks">Thank you for helping with the cover.</p>
+      </div>`;
+    } else {
+      // swap: two slips
+      const hasSwap = g.rows.some(r=>!isBlank(r.swapDate));
+      const swapWhen = (!isBlank(g.swapDate))
+        ? `on <span class="strong">${esc(g.swapDate)}${g.swapDay&&!isBlank(g.swapDay)?' ('+esc(g.swapDay)+')':''}</span>` : '';
+
+      // Slip 1 -> substitute teacher (covers now, gets swap back)
+      html += `<div class="slip">
+        <div class="slip-head">
+          <p class="slip-title">Lesson Substitution Notice</p>
+          <p class="slip-kind">For substitute teacher</p>
+        </div>
+        <p class="to">To: <span class="strong">${esc(g.subTea)}</span></p>
+        <p>You are arranged to <span class="strong">cover</span> the following lesson(s) for <span class="strong">${esc(g.subjTea)}</span>:</p>
+        ${lessonTable(g.rows,false)}
+        ${hasSwap ? `<p>In return, <span class="strong">${esc(g.subjTea)}</span> will swap back to teach for you ${swapWhen}:</p>${lessonTable(g.rows,true)}` : ''}
+        ${remark}
+        <p class="thanks">Thank you for helping with the swap.</p>
+      </div>`;
+
+      // Slip 2 -> subject (swap) teacher (returns the swap)
+      html += `<div class="slip">
+        <div class="slip-head">
+          <p class="slip-title">Lesson Swap Notice</p>
+          <p class="slip-kind">For swap teacher</p>
+        </div>
+        <p class="to">To: <span class="strong">${esc(g.subjTea)}</span></p>
+        <p><span class="strong">${esc(g.subTea)}</span> has covered your lesson(s) on <span class="strong">${esc(g.date)}${g.day&&!isBlank(g.day)?' ('+esc(g.day)+')':''}</span>. In return, you are arranged to <span class="strong">swap back</span> and teach the following ${swapWhen}:</p>
+        ${lessonTable(g.rows,true)}
+        ${remark}
+        <p class="thanks">Thank you for helping with the swap.</p>
+      </div>`;
+    }
+  });
+  return html;
+}
+
+function generate(){
+  const err = document.getElementById('err');
+  const out = document.getElementById('out');
+  err.textContent=''; out.innerHTML='';
+  try{
+    const rows = parseTable(document.getElementById('input').value);
+    const groups = groupRows(rows);
+    out.innerHTML = buildSlips(groups);
+    document.getElementById('pdfBtn').disabled = false;
+  }catch(e){
+    err.textContent = e.message;
+    document.getElementById('pdfBtn').disabled = true;
+  }
+}
+
+function downloadPDF(){
+  const el = document.getElementById('out');
+  if(!el.innerHTML.trim()){ return; }
+  const opt = {
+    margin: [8,8,8,8],
+    filename: 'substitution_slips_mk.pdf',
+    image: { type:'jpeg', quality:0.98 },
+    html2canvas: { scale: 2, useCORS: true },
+    jsPDF: { unit:'mm', format:'a4', orientation:'portrait' },
+    pagebreak: { mode:['css','legacy'], avoid:'.slip' }
+  };
+  html2pdf().set(opt).from(el).save();
+}
+</script>
+</body>
+</html>

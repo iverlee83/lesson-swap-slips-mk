@@ -88,14 +88,33 @@ function loadSample(){ document.getElementById('input').value = SAMPLE; }
 function isBlank(v){ const t=(v||'').trim(); return t==='' || t==='/' || t==='-'; }
 
 function parseTable(text){
-  const lines = text.replace(/\r/g,'').split('\n').map(l=>l).filter(l=>l.trim()!=='');
-  if(lines.length<2) throw new Error('Please paste at least a header row and one data row.');
+  const rawLines = text.replace(/\r/g,'').split('\n').filter(l=>l.trim()!=='');
+  if(rawLines.length<2) throw new Error('Please paste at least a header row and one data row.');
   // detect header: first line containing "Subject Teacher" or "Substitute"
   let start = 0;
-  if(/subject teacher|substitute/i.test(lines[0])) start = 1;
+  if(/subject teacher|substitute/i.test(rawLines[0])) start = 1;
+
+  // Excel sometimes copies a cell with a line-break inside it (e.g. a teacher-code
+  // cell wrapped to two lines) as a literal newline in the pasted text. That splits
+  // one real table row into several text lines and silently drops the later columns
+  // (Swap Date/Day/Class/Lesson/Time). Reconstruct real rows: a line starting with a
+  // date-like first cell begins a new row; any other line is a wrapped continuation
+  // of the previous row's cell content, so it's re-joined onto it.
+  const DATE_RE = /^\d{1,2}[\/-][A-Za-z]{3,}$/;
+  const merged = [];
+  for(let i=start;i<rawLines.length;i++){
+    const line = rawLines[i];
+    const firstCell = line.split('\t')[0].trim();
+    if(merged.length===0 || DATE_RE.test(firstCell)){
+      merged.push(line);
+    } else {
+      merged[merged.length-1] += line;
+    }
+  }
+
   const rows = [];
-  for(let i=start;i<lines.length;i++){
-    const c = lines[i].split('\t');
+  for(let i=0;i<merged.length;i++){
+    const c = merged[i].split('\t');
     if(c.length < 8) continue; // skip malformed (needs through Substitute Teacher, incl. Leave column)
     rows.push({
       date:      (c[0]||'').trim(),

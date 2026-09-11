@@ -60,9 +60,11 @@
   .tr-days { font-size:13px; color:#555; display:flex; align-items:center; gap:4px; }
   .tr-days input { width:46px; padding:3px 5px; border:1px solid #ccc; border-radius:4px; }
   .tracker-panel { margin-top:12px; }
-  .tr-item { padding:8px 0; border-bottom:1px solid #eee; font-size:13px; }
+  .tr-item { padding:8px 0; border-bottom:1px solid #eee; font-size:13px; display:flex; align-items:center; justify-content:space-between; gap:10px; }
   .tr-item:last-child { border-bottom:none; }
-  .tr-item label { display:flex; align-items:center; gap:8px; flex-wrap:wrap; cursor:pointer; }
+  .tr-item label { display:flex; align-items:center; gap:8px; flex-wrap:wrap; cursor:pointer; flex:1; }
+  .tr-print { flex-shrink:0; font-size:12px; padding:4px 10px; border-radius:6px; border:1px solid #c44; background:#fff; color:#c44; cursor:pointer; }
+  .tr-print:hover { background:#fee; }
   .tr-item.printed { opacity:.45; }
   .tr-item.printed .tr-type, .tr-item.printed .tr-to, .tr-item.printed .tr-summary { text-decoration:line-through; }
   .tr-badge { font-size:11px; font-weight:700; padding:2px 7px; border-radius:10px; background:#eee; color:#555; white-space:nowrap; }
@@ -200,14 +202,26 @@ function trackerId(type, to, forWhom, date){
 function buildTrackerItems(groups){
   // Only the return "swap-back" notice gets tracked: that's the one with a future
   // date that's easy to forget. Cover slips and the substitute's own Substitution
-  // slip are used right away, so they aren't remembered here.
+  // slip are used right away, so they aren't remembered here. We keep enough of
+  // the original row data (dates, lessons, remark) so the slip can be reprinted
+  // straight from the tracker, matching the original "Lesson Swap Notice" layout.
   const items = [];
   groups.forEach(g=>{
     if(g.isCover) return;
     if(isBlank(g.swapDate)) return;
     const swapSummary = g.rows.map(r=>[r.swapCls,r.swapLesson].filter(Boolean).join(' ')).join(', ');
-    items.push({ id: trackerId('swap', g.subjTea, g.subTea, g.swapDate), type:'Swap-back',
-      to: g.subjTea, forWhom: g.subTea, dueDate: g.swapDate, summary: swapSummary });
+    items.push({
+      id: trackerId('swap', g.subjTea, g.subTea, g.swapDate),
+      type:'Swap-back',
+      to: g.subjTea,
+      forWhom: g.subTea,
+      dueDate: g.swapDate,
+      summary: swapSummary,
+      origDate: g.date,
+      origDay: g.day,
+      remark: g.remark,
+      rows: g.rows.map(r=>({ swapDate:r.swapDate, swapDay:r.swapDay, swapCls:r.swapCls, swapLesson:r.swapLesson, swapTime:r.swapTime }))
+    });
   });
   return items;
 }
@@ -222,6 +236,10 @@ function mergeTrackerItems(newItems){
       map[it.id].forWhom = it.forWhom;
       map[it.id].dueDate = it.dueDate;
       map[it.id].summary = it.summary;
+      map[it.id].origDate = it.origDate;
+      map[it.id].origDay = it.origDay;
+      map[it.id].remark = it.remark;
+      map[it.id].rows = it.rows;
     }
   });
   saveTrackerItemsMap(map);
@@ -270,7 +288,10 @@ function dueItems(){
   return Object.values(map)
     .filter(it=>!it.printed)
     .map(it=>{ const d = parseDMY(it.dueDate); return { ...it, diff: d ? daysDiff(today, d) : null }; })
-    .filter(it=> it.diff===null || it.diff<=days)
+    // overdue (diff < 0) is excluded here — those slips' return date has already
+    // passed, so they no longer need to be printed. They still show, correctly
+    // labelled OVERDUE, in "All tracked slips" for reference.
+    .filter(it=> it.diff===null || (it.diff>=0 && it.diff<=days))
     .sort((a,b)=>{
       if(a.diff===null) return -1;
       if(b.diff===null) return 1;
@@ -294,6 +315,7 @@ function trackerRowHtml(it){
         <span class="tr-date">${esc(it.dueDate)}</span>
         <span class="tr-summary">${esc(it.summary)}</span>
       </label>
+      <button type="button" class="tr-print" onclick="printItem('${it.id}')">Print</button>
     </div>`;
 }
 
@@ -349,6 +371,58 @@ function updateDueBadge(){
   const count = dueItems().length;
   const btn = document.getElementById('checkDueBtn');
   if(btn) btn.textContent = count>0 ? `Anything to print? (${count})` : 'Anything to print?';
+}
+const SLIP_PRINT_CSS = `
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin:0; padding:16px; background:#fff; color:#1a1a1a; }
+  .slip { background:#fff; border-radius:4px; padding:20px 26px; margin:0 0 14px; box-sizing:border-box; min-height:132mm; display:flex; flex-direction:column; }
+  .slip-head { text-align:center; border-bottom:2px solid #333; padding-bottom:8px; margin-bottom:14px; }
+  .slip-title { font-size:18px; font-weight:700; margin:0; }
+  .slip-kind { font-size:11px; color:#666; margin:3px 0 0; text-transform:uppercase; letter-spacing:.5px; }
+  .slip p { font-size:13.5px; line-height:1.6; margin:0 0 10px; }
+  .slip .to { font-size:15px; }
+  .slip table { width:100%; border-collapse:collapse; font-size:13px; margin:4px 0 12px; }
+  .slip th { text-align:left; color:#555; font-weight:600; padding:5px 8px; border-bottom:1.5px solid #999; }
+  .slip td { padding:5px 8px; border-bottom:1px solid #ddd; }
+  .slip .remark { font-size:12.5px; color:#555; margin:4px 0 0; }
+  .slip .thanks { font-size:13.5px; font-style:italic; color:#1a5; margin:auto 0 0; padding-top:12px; }
+  .strong { font-weight:700; }
+`;
+
+function swapSlipRowsTable(rows){
+  const head = '<tr><th>Date</th><th>Day</th><th>Class</th><th>Lesson</th><th>Time</th></tr>';
+  const body = rows.map(r=>`<tr><td>${esc(r.swapDate)}</td><td>${esc(r.swapDay)}</td><td>${esc(r.swapCls)}</td><td>${esc(r.swapLesson)}</td><td>${esc(r.swapTime)}</td></tr>`).join('');
+  return `<table>${head}${body}</table>`;
+}
+
+function swapSlipHtml(item){
+  const remark = item.remark && !isBlank(item.remark) && !/^cover$/i.test(item.remark)
+    ? `<p class="remark">Remark: ${esc(item.remark)}</p>` : '';
+  const swapWhen = !isBlank(item.dueDate) ? `on <span class="strong">${esc(item.dueDate)}</span>` : '';
+  return `<div class="slip">
+      <div class="slip-head">
+        <p class="slip-title">Lesson Swap Notice</p>
+        <p class="slip-kind">For swap teacher</p>
+      </div>
+      <p class="to">To: <span class="strong">${esc(item.to)}</span></p>
+      <p><span class="strong">${esc(item.forWhom)}</span> has covered your lesson(s) on <span class="strong">${esc(item.origDate)}${item.origDay && !isBlank(item.origDay) ? ' (' + esc(item.origDay) + ')' : ''}</span>. In return, you are arranged to <span class="strong">swap back</span> and teach the following ${swapWhen}:</p>
+      ${swapSlipRowsTable(item.rows || [])}
+      ${remark}
+      <p class="thanks">Thank you for helping with the swap.</p>
+    </div>`;
+}
+
+function printItem(id){
+  const map = loadTrackerItems();
+  const item = map[id];
+  if(!item) return;
+  const html = swapSlipHtml(item);
+  const win = window.open('', '_blank', 'width=650,height=820');
+  if(!win){ alert('Please allow pop-ups for this page to print directly \u2014 or use Download PDF instead.'); return; }
+  win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Swap-back notice \u2014 ${esc(item.to)}</title><style>${SLIP_PRINT_CSS}</style></head><body>${html}</body></html>`);
+  win.document.close();
+  win.focus();
+  setTimeout(()=>{ try{ win.print(); }catch(e){} }, 200);
 }
 /* ---------- end print tracker ---------- */
 

@@ -55,6 +55,22 @@
   @media screen {
     #out { background: #fff; }
   }
+  .tracker { margin: 4px 0 22px; padding: 14px 16px; background:#fff; border:1px solid #e2e2e2; border-radius:8px; }
+  .tracker-row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  .tr-days { font-size:13px; color:#555; display:flex; align-items:center; gap:4px; }
+  .tr-days input { width:46px; padding:3px 5px; border:1px solid #ccc; border-radius:4px; }
+  .tracker-panel { margin-top:12px; }
+  .tr-item { padding:8px 0; border-bottom:1px solid #eee; font-size:13px; }
+  .tr-item:last-child { border-bottom:none; }
+  .tr-item label { display:flex; align-items:center; gap:8px; flex-wrap:wrap; cursor:pointer; }
+  .tr-item.printed { opacity:.45; }
+  .tr-item.printed .tr-type, .tr-item.printed .tr-to, .tr-item.printed .tr-summary { text-decoration:line-through; }
+  .tr-badge { font-size:11px; font-weight:700; padding:2px 7px; border-radius:10px; background:#eee; color:#555; white-space:nowrap; }
+  .tr-badge.tr-overdue { background:#fdd; color:#a00; }
+  .tr-badge.tr-today { background:#ffe6a8; color:#8a5a00; }
+  .tr-type { font-weight:600; }
+  .tr-summary { color:#777; }
+  .tr-empty { font-size:13px; color:#777; margin:0; }
 </style>
 </head>
 <body>
@@ -69,6 +85,17 @@
     <button onclick="generate()">Generate slips</button>
     <button class="sec" onclick="downloadPDF()" id="pdfBtn" disabled>Download PDF</button>
     <button class="sec" onclick="loadSample()">Load sample</button>
+  </div>
+
+    <div class="tracker">
+    <div class="tracker-row">
+      <button class="sec" id="checkDueBtn" onclick="checkDue()">Anything to print?</button>
+      <label class="tr-days">Look ahead <input type="number" id="lookaheadDays" min="0" max="30" value="3" onchange="setLookaheadDays(this.value)">day(s)</label>
+      <button class="sec" onclick="toggleAllTracked()">All tracked slips</button>
+      <button class="sec" onclick="clearTracker()">Clear tracker</button>
+    </div>
+    <div id="trackerPanel" class="tracker-panel" hidden></div>
+    <div id="allTrackerPanel" class="tracker-panel" hidden></div>
   </div>
 
   <div class="err" id="err"></div>
@@ -156,6 +183,179 @@ function firstMeta(r){
            swapDate:r.swapDate, swapDay:r.swapDay };
 }
 
+/* ---------- Print tracker (remembers every slip generated, in this browser) ---------- */
+const TRACKER_KEY = 'lsw_tracker_items_v1';
+const TRACKER_DAYS_KEY = 'lsw_tracker_days_v1';
+
+function loadTrackerItems(){
+  try{ return JSON.parse(localStorage.getItem(TRACKER_KEY) || '{}'); }catch(e){ return {}; }
+}
+function saveTrackerItemsMap(map){
+  try{ localStorage.setItem(TRACKER_KEY, JSON.stringify(map)); }catch(e){}
+}
+function trackerId(type, to, forWhom, date){
+  return [type, to, forWhom, date].join('|').toLowerCase().replace(/\s+/g,'_');
+}
+function buildTrackerItems(groups){
+  const items = [];
+  groups.forEach(g=>{
+    const summary = g.rows.map(r=>[r.cls,r.lesson].filter(Boolean).join(' ')).join(', ');
+    if(g.isCover){
+      items.push({ id: trackerId('cover', g.subTea, g.subjTea, g.date), type:'Cover',
+        to: g.subTea, forWhom: g.subjTea, dueDate: g.date, summary });
+    } else {
+      items.push({ id: trackerId('sub', g.subTea, g.subjTea, g.date), type:'Substitution',
+        to: g.subTea, forWhom: g.subjTea, dueDate: g.date, summary });
+      if(!isBlank(g.swapDate)){
+        const swapSummary = g.rows.map(r=>[r.swapCls,r.swapLesson].filter(Boolean).join(' ')).join(', ');
+        items.push({ id: trackerId('swap', g.subjTea, g.subTea, g.swapDate), type:'Swap-back',
+          to: g.subjTea, forWhom: g.subTea, dueDate: g.swapDate, summary: swapSummary });
+      }
+    }
+  });
+  return items;
+}
+function mergeTrackerItems(newItems){
+  const map = loadTrackerItems();
+  newItems.forEach(it=>{
+    if(!map[it.id]){
+      map[it.id] = { ...it, printed:false, createdAt: Date.now() };
+    } else {
+      map[it.id].type = it.type;
+      map[it.id].to = it.to;
+      map[it.id].forWhom = it.forWhom;
+      map[it.id].dueDate = it.dueDate;
+      map[it.id].summary = it.summary;
+    }
+  });
+  saveTrackerItemsMap(map);
+}
+
+function getLookaheadDays(){
+  const v = parseInt(localStorage.getItem(TRACKER_DAYS_KEY), 10);
+  return isNaN(v) ? 3 : v;
+}
+function setLookaheadDays(v){
+  const n = Math.max(0, parseInt(v,10) || 0);
+  try{ localStorage.setItem(TRACKER_DAYS_KEY, String(n)); }catch(e){}
+  updateDueBadge();
+  const duePanel = document.getElementById('trackerPanel');
+  if(!duePanel.hidden) checkDue();
+}
+
+function parseDMY(s){
+  if(!s) return null;
+  const m = s.trim().match(/^(\d{1,2})[\/-]([A-Za-z]{3,9})$/);
+  if(!m) return null;
+  const day = parseInt(m[1],10);
+  const months = {jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11};
+  const mon = months[m[2].slice(0,3).toLowerCase()];
+  if(mon===undefined || isNaN(day)) return null;
+  const now = new Date();
+  let d = new Date(now.getFullYear(), mon, day);
+  const diffDays = (d - now) / 86400000;
+  if(diffDays < -180) d = new Date(now.getFullYear()+1, mon, day);
+  if(diffDays > 180) d = new Date(now.getFullYear()-1, mon, day);
+  return d;
+}
+function todayStart(){ const n = new Date(); return new Date(n.getFullYear(), n.getMonth(), n.getDate()); }
+function daysDiff(a,b){ return Math.round((b - a) / 86400000); }
+function statusLabel(diff){
+  if(diff===null) return 'DATE UNCLEAR';
+  if(diff<0) return `OVERDUE ${-diff}d`;
+  if(diff===0) return 'DUE TODAY';
+  return `in ${diff}d`;
+}
+
+function dueItems(){
+  const map = loadTrackerItems();
+  const days = getLookaheadDays();
+  const today = todayStart();
+  return Object.values(map)
+    .filter(it=>!it.printed)
+    .map(it=>{ const d = parseDMY(it.dueDate); return { ...it, diff: d ? daysDiff(today, d) : null }; })
+    .filter(it=> it.diff===null || it.diff<=days)
+    .sort((a,b)=>{
+      if(a.diff===null) return -1;
+      if(b.diff===null) return 1;
+      return a.diff - b.diff;
+    });
+}
+
+function trackerRowHtml(it){
+  const overdue = it.diff!==null && it.diff<0 && !it.printed;
+  const dueToday = it.diff===0 && !it.printed;
+  const badgeCls = it.printed ? '' : (overdue ? 'tr-overdue' : (dueToday ? 'tr-today' : ''));
+  const badgeText = it.printed ? 'PRINTED' : statusLabel(it.diff);
+  const relation = it.type==='Swap-back' ? 'covering for' : 'covering';
+  return `<div class="tr-item${it.printed?' printed':''}">
+      <label>
+        <input type="checkbox" ${it.printed?'checked':''} onchange="markPrinted('${it.id}', this.checked)">
+        <span class="tr-badge ${badgeCls}">${badgeText}</span>
+        <span class="tr-type">${esc(it.type)}</span>
+        <span class="tr-to">To: <b>${esc(it.to)}</b></span>
+        <span class="tr-for">(${relation} ${esc(it.forWhom)})</span>
+        <span class="tr-date">${esc(it.dueDate)}</span>
+        <span class="tr-summary">${esc(it.summary)}</span>
+      </label>
+    </div>`;
+}
+
+function checkDue(){
+  const panel = document.getElementById('trackerPanel');
+  const due = dueItems();
+  panel.hidden = false;
+  panel.innerHTML = due.length
+    ? due.map(trackerRowHtml).join('')
+    : '<p class="tr-empty">Nothing to print — all caught up.</p>';
+}
+
+function toggleAllTracked(){
+  const panel = document.getElementById('allTrackerPanel');
+  if(panel.hidden){ renderAllPanel(); } else { panel.hidden = true; }
+}
+function renderAllPanel(){
+  const map = loadTrackerItems();
+  const today = todayStart();
+  const all = Object.values(map)
+    .map(it=>{ const d = parseDMY(it.dueDate); return { ...it, diff: d ? daysDiff(today, d) : null }; })
+    .sort((a,b)=>{
+      if(a.diff===null) return 1;
+      if(b.diff===null) return -1;
+      return a.diff - b.diff;
+    });
+  const panel = document.getElementById('allTrackerPanel');
+  panel.hidden = false;
+  panel.innerHTML = all.length
+    ? all.map(trackerRowHtml).join('')
+    : '<p class="tr-empty">No tracked slips yet — generate some slips first.</p>';
+}
+
+function markPrinted(id, val){
+  const map = loadTrackerItems();
+  if(map[id]){ map[id].printed = val; saveTrackerItemsMap(map); }
+  const duePanel = document.getElementById('trackerPanel');
+  if(!duePanel.hidden) checkDue();
+  const allPanel = document.getElementById('allTrackerPanel');
+  if(!allPanel.hidden) renderAllPanel();
+  updateDueBadge();
+}
+
+function clearTracker(){
+  if(!confirm('Clear all tracked slip history? This cannot be undone.')) return;
+  try{ localStorage.removeItem(TRACKER_KEY); }catch(e){}
+  document.getElementById('trackerPanel').hidden = true;
+  document.getElementById('allTrackerPanel').hidden = true;
+  updateDueBadge();
+}
+
+function updateDueBadge(){
+  const count = dueItems().length;
+  const btn = document.getElementById('checkDueBtn');
+  if(btn) btn.textContent = count>0 ? `Anything to print? (${count})` : 'Anything to print?';
+}
+/* ---------- end print tracker ---------- */
+
 function esc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
 function lessonTable(rows, swap){
@@ -236,6 +436,8 @@ function generate(){
     const groups = groupRows(rows);
     out.innerHTML = buildSlips(groups);
     document.getElementById('pdfBtn').disabled = false;
+    mergeTrackerItems(buildTrackerItems(groups));
+    updateDueBadge();
   }catch(e){
     err.textContent = e.message;
     document.getElementById('pdfBtn').disabled = true;
@@ -255,6 +457,11 @@ function downloadPDF(){
   };
   html2pdf().set(opt).from(el).save();
 }
+(function initTracker(){
+  const daysInput = document.getElementById('lookaheadDays');
+  if(daysInput) daysInput.value = getLookaheadDays();
+  updateDueBadge();
+})();
 </script>
 </body>
 </html>

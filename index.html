@@ -96,6 +96,7 @@
     </div>
     <div id="trackerPanel" class="tracker-panel" hidden></div>
     <div id="allTrackerPanel" class="tracker-panel" hidden></div>
+    <p class="note tr-note">Tracks return "swap-back" notices only (the ones with a future date).</p>
   </div>
 
   <div class="err" id="err"></div>
@@ -197,21 +198,16 @@ function trackerId(type, to, forWhom, date){
   return [type, to, forWhom, date].join('|').toLowerCase().replace(/\s+/g,'_');
 }
 function buildTrackerItems(groups){
+  // Only the return "swap-back" notice gets tracked: that's the one with a future
+  // date that's easy to forget. Cover slips and the substitute's own Substitution
+  // slip are used right away, so they aren't remembered here.
   const items = [];
   groups.forEach(g=>{
-    const summary = g.rows.map(r=>[r.cls,r.lesson].filter(Boolean).join(' ')).join(', ');
-    if(g.isCover){
-      items.push({ id: trackerId('cover', g.subTea, g.subjTea, g.date), type:'Cover',
-        to: g.subTea, forWhom: g.subjTea, dueDate: g.date, summary });
-    } else {
-      items.push({ id: trackerId('sub', g.subTea, g.subjTea, g.date), type:'Substitution',
-        to: g.subTea, forWhom: g.subjTea, dueDate: g.date, summary });
-      if(!isBlank(g.swapDate)){
-        const swapSummary = g.rows.map(r=>[r.swapCls,r.swapLesson].filter(Boolean).join(' ')).join(', ');
-        items.push({ id: trackerId('swap', g.subjTea, g.subTea, g.swapDate), type:'Swap-back',
-          to: g.subjTea, forWhom: g.subTea, dueDate: g.swapDate, summary: swapSummary });
-      }
-    }
+    if(g.isCover) return;
+    if(isBlank(g.swapDate)) return;
+    const swapSummary = g.rows.map(r=>[r.swapCls,r.swapLesson].filter(Boolean).join(' ')).join(', ');
+    items.push({ id: trackerId('swap', g.subjTea, g.subTea, g.swapDate), type:'Swap-back',
+      to: g.subjTea, forWhom: g.subTea, dueDate: g.swapDate, summary: swapSummary });
   });
   return items;
 }
